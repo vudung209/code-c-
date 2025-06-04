@@ -3,69 +3,74 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-
 #include <thread>
 #include <vector>
-
-#pragma comment(lib, "ws2_32.lib")
+#include <mutex>
+#include <algorithm>
+#include <cstring>
 
 #define SERVER_PORT 12345
 #define BUFFER_SIZE 1024
 
 using namespace std;
 
-vector<SOCKET> clients;
+vector<int> clients;
+mutex clientsMutex;
 
-void broadcastMessage(const string& message, SOCKET sender) {
-    for (SOCKET client : clients) {
+void broadcastMessage(const string& message, int sender) {
+    lock_guard<mutex> lock(clientsMutex);
+    for (int client : clients) {
         if (client != sender) {
             send(client, message.c_str(), message.length(), 0);
         }
     }
 }
 
-void handleClient(SOCKET clientSocket) {
-    char buffer[BUFFER_SIZE];
+void handleClient(int clientSocket) {
+    char buffer[BUFFER_SIZE + 1];
     while (true) {
         int recvResult = recv(clientSocket, buffer, BUFFER_SIZE, 0);
-        if (recvResult > 0) {
-            buffer[recvResult] = '\0';
-            cout << "Received message: " << buffer << endl;
-            broadcastMessage(buffer, clientSocket);
-        } else {
+        if (recvResult <= 0) {
             cout << "Client disconnected!" << endl;
-            closesocket(clientSocket);
+            close(clientSocket);
+            lock_guard<mutex> lock(clientsMutex);
+            clients.erase(remove(clients.begin(), clients.end(), clientSocket), clients.end());
             break;
         }
+        buffer[recvResult] = '\0';
+        cout << "Received: " << buffer << endl;
+        broadcastMessage(buffer, clientSocket);
     }
 }
 
 void startServer() {
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
-
-    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(SERVER_PORT);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
+    bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
     listen(serverSocket, 5);
 
     cout << "Server started. Waiting for connections..." << endl;
 
     while (true) {
-        SOCKET clientSocket = accept(serverSocket, NULL, NULL);
-        if (clientSocket != INVALID_SOCKET) {
-            clients.push_back(clientSocket);
+        sockaddr_in clientAddr;
+        socklen_t addrLen = sizeof(clientAddr);
+        int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &addrLen);
+        if (clientSocket != -1) {
+            {
+                lock_guard<mutex> lock(clientsMutex);
+                clients.push_back(clientSocket);
+            }
             cout << "Client connected!" << endl;
-            thread clientThread(handleClient, clientSocket);
-            clientThread.detach();
+            thread t(handleClient, clientSocket);
+            t.detach();
         }
     }
 
-    WSACleanup();
+    close(serverSocket);
 }
 
 int main() {
